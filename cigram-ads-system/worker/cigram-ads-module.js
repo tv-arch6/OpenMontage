@@ -99,7 +99,14 @@ function adsParseTime(value) {
   return isFinite(t) ? t : 0;
 }
 
+/**
+ * A missing value yields `def`; a present one is clamped into [lo, hi].
+ * null / undefined / "" all count as MISSING — Number(null) is 0, so without this
+ * an absent `?limit=` would read as 0 and clamp to the minimum, quietly
+ * truncating every paginated list to one row.
+ */
 function adsInt(value, def, lo, hi) {
+  if (value === null || value === undefined || value === "") return def;
   const n = Number(value);
   if (!isFinite(n)) return def;
   let v = Math.round(n);
@@ -108,7 +115,9 @@ function adsInt(value, def, lo, hi) {
   return v;
 }
 
+/** Same missing-vs-zero rule as adsInt, for money and percentages. */
 function adsNum(value, def, lo, hi) {
+  if (value === null || value === undefined || value === "") return def;
   const n = Number(value);
   if (!isFinite(n)) return def;
   let v = n;
@@ -1544,7 +1553,9 @@ function adsSniffType(buffer) {
   if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
   if (b[0] === 0x89 && ascii(1, 3) === "PNG") return "image/png";
   if (ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP") return "image/webp";
-  if (ascii(0, 3) === "GIF") return "image/gif";
+  // the full signature, not just "GIF": a text file starting with those three
+  // letters is not an image.
+  if (ascii(0, 6) === "GIF87a" || ascii(0, 6) === "GIF89a") return "image/gif";
   if (ascii(0, 4) === "%PDF") return "application/pdf";
   if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return "video/webm";
   if (ascii(4, 4) === "ftyp") {

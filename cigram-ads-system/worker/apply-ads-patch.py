@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """
-Merges cigram-ads-module.js into cigram-admin-worker-v2.js and writes the single
-file you paste into the Cloudflare dashboard. Nothing in the source worker is
-removed: three lines are inserted into its router and the module is appended.
+Merges the ads modules into cigram-admin-worker-v2.js and writes the single file
+you paste into the Cloudflare dashboard. Nothing in the source worker is removed:
+three lines go into its router and the modules are appended after it.
 
+    python3 apply-ads-patch.py cigram-admin-worker-v2.js out.js
     python3 apply-ads-patch.py cigram-admin-worker-v2.js cigram-ads-module.js out.js
 
-Re-running it on an already-patched file is refused, so it is safe to retry.
+With no module listed it appends every cigram-ads-*module.js next to this script,
+in phase order. Re-running it on an already-patched file is refused, so retrying
+is safe.
 """
+import glob
+import os
+import re
 import sys
 
 HEALTH_ANCHOR = ".concat(Object.keys(MEDIA_ROUTES)),"
@@ -31,7 +37,30 @@ CRON_PATCH = CRON_ANCHOR + """    ctx.waitUntil(
 """
 
 
-def patch(worker: str, module: str) -> str:
+def default_modules() -> list:
+    """Every ads module beside this script, in phase order (base first)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    order = ["cigram-ads-module.js", "cigram-ads-chat-module.js"]
+    found = sorted(glob.glob(os.path.join(here, "cigram-ads-*module.js")))
+    ranked = sorted(found, key=lambda p: (order.index(os.path.basename(p))
+                                          if os.path.basename(p) in order else 99,
+                                          os.path.basename(p)))
+    if not ranked:
+        raise SystemExit("ERROR: no cigram-ads-*module.js found next to this script.")
+    return ranked
+
+
+def route_tables(modules: list) -> list:
+    """Finds every `const ADS_*_ROUTES = ` table so they can be merged into ADS_ROUTES."""
+    names = []
+    for text in modules:
+        for name in re.findall(r"^const (ADS_[A-Z_]*ROUTES) = ", text, re.M):
+            if name != "ADS_ROUTES" and name not in names:
+                names.append(name)
+    return names
+
+
+def patch(worker: str, modules: list) -> str:
     if "ADS_ROUTES" in worker:
         raise SystemExit("ERROR: this worker already contains the ads module. Start from a clean v2 file.")
 
@@ -49,17 +78,34 @@ def patch(worker: str, module: str) -> str:
     worker = worker.replace(HEALTH_ANCHOR, HEALTH_PATCH, 1)
     worker = worker.replace(ROUTER_ANCHOR, ROUTER_PATCH, 1)
     worker = worker.replace(CRON_ANCHOR, CRON_PATCH, 1)
-    return worker.rstrip("\n") + "\n\n" + module.lstrip("\n")
+
+    out = [worker.rstrip("\n")]
+    out.extend(text.strip("\n") for text in modules)
+
+    extra = route_tables(modules)
+    if extra:
+        merge = ["", "// Later phases add their routes to the one table the router reads.",
+                 "// (appended by apply-ads-patch.py)"]
+        for name in extra:
+            merge.append("Object.assign(ADS_ROUTES, %s);" % name)
+        out.append("\n".join(merge))
+    return "\n\n".join(out) + "\n"
 
 
 def main() -> None:
-    if len(sys.argv) != 4:
+    if len(sys.argv) < 3:
         raise SystemExit(__doc__)
-    worker = open(sys.argv[1], encoding="utf-8").read()
-    module = open(sys.argv[2], encoding="utf-8").read()
-    out = patch(worker, module)
-    open(sys.argv[3], "w", encoding="utf-8").write(out)
-    print(f"wrote {sys.argv[3]} ({len(out)} bytes)")
+    worker_path = sys.argv[1]
+    out_path = sys.argv[-1]
+    module_paths = sys.argv[2:-1] or default_modules()
+
+    worker = open(worker_path, encoding="utf-8").read()
+    modules = [open(p, encoding="utf-8").read() for p in module_paths]
+    out = patch(worker, modules)
+    open(out_path, "w", encoding="utf-8").write(out)
+    print("wrote %s (%d bytes) from %s + %s"
+          % (out_path, len(out), os.path.basename(worker_path),
+             ", ".join(os.path.basename(p) for p in module_paths)))
 
 
 if __name__ == "__main__":

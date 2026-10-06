@@ -11,9 +11,12 @@
 ```bash
 python3 apply-ads-patch.py \
     cigram-admin-worker-v2.js \
-    cigram-ads-module.js \
     cigram-admin-worker-v5-ads.js
 ```
+
+بدون تحديد وحدات يأخذ السكربت **كل** `cigram-ads-*module.js` بجواره بالترتيب
+(`cigram-ads-module.js` ثم `cigram-ads-chat-module.js`) ويضيف سطر
+`Object.assign(ADS_ROUTES, ADS_CHAT_ROUTES);` بنفسه.
 
 الناتج `cigram-admin-worker-v5-ads.js` هو الملف الذي تلصقه في Cloudflare.
 السكربت يرفض العمل على ملف مُعدَّل مسبقاً، فإعادة تشغيله آمنة.
@@ -49,7 +52,12 @@ python3 apply-ads-patch.py \
     );
 ```
 
-**(د)** الصق محتوى `cigram-ads-module.js` كاملاً في **آخر** الملف.
+**(د)** الصق محتوى `cigram-ads-module.js` ثم `cigram-ads-chat-module.js` في **آخر** الملف،
+ثم أضف بعدهما سطراً واحداً:
+
+```js
+Object.assign(ADS_ROUTES, ADS_CHAT_ROUTES);
+```
 
 ---
 
@@ -63,7 +71,24 @@ Workers & Pages ← الـ Worker ← **Settings → Bindings**
 | Secret | `ADMIN_TOKEN` | كما هو | موجود — لا تغيّره |
 | Secret | `PUSH_WEBHOOK_URL` | كما هو | اختياري — موجود |
 | **Durable Object** | **`ADS_STATS`** | الصنف `AdsStatsDO` | **جديد — إلزامي** |
+| **Durable Object** | **`ADS_CHAT`** | الصنف `AdsChatDO` | **جديد — إلزامي للمحادثة** |
+| **Durable Object** | **`ADS_CHAT_INDEX`** | الصنف `AdsChatIndexDO` | **جديد — إلزامي للمحادثة** |
 | Variable | `ADS_AUTH_VERIFY_URL` | `https://cigram-auth-api.wwq-mixtv.workers.dev/verify` | جديد — اختياري (هذه قيمته الافتراضية) |
+| Secret | `ADS_MEDIA_KEY` | ٣٢ بايت Base64 — مفتاح AES-GCM لتشفير التخزين | **جديد — مطلوب للمحادثة** |
+| Secret | `ADS_MEDIA_SIGN` | نص عشوائي طويل — يوقّع روابط الوسائط | جديد — موصى به (يسقط على `ADMIN_TOKEN` إن غاب) |
+
+توليد المفتاحين:
+
+```bash
+openssl rand -base64 32    # ADS_MEDIA_KEY  (يجب أن يكون ٣٢ بايت بالضبط)
+openssl rand -hex 32       # ADS_MEDIA_SIGN
+```
+
+> **احفظ `ADS_MEDIA_KEY` في مكان آمن.** فقدانه يعني أن الرسائل والوسائط المخزّنة
+> لا تُفك أبداً. تغييره يُفقد كل ما خُزّن قبله (الرسائل القديمة تظهر فارغة
+> والوسائط القديمة تفشل) — انظر خطة تدوير المفاتيح في `docs/SECURITY.md`.
+> إن تُرك فارغاً تعمل المحادثة لكن **بدون تشفير أثناء التخزين**، و
+> `GET /admin/ads/security` يقول ذلك صراحةً بدل أن يدّعي التشفير.
 
 ### هجرة الـ Durable Object (إلزامية مرة واحدة)
 
@@ -76,9 +101,17 @@ Workers & Pages ← الـ Worker ← **Settings → Bindings**
 name       = "ADS_STATS"
 class_name = "AdsStatsDO"
 
+[[durable_objects.bindings]]
+name       = "ADS_CHAT"
+class_name = "AdsChatDO"
+
+[[durable_objects.bindings]]
+name       = "ADS_CHAT_INDEX"
+class_name = "AdsChatIndexDO"
+
 [[migrations]]
-tag         = "v1-ads-stats"
-new_classes = ["AdsStatsDO"]
+tag         = "v1-ads"
+new_classes = ["AdsStatsDO", "AdsChatDO", "AdsChatIndexDO"]
 ```
 
 **من لوحة التحكم** (بدون Wrangler): بعد لصق الكود ونشره، افتح
@@ -87,6 +120,8 @@ new_classes = ["AdsStatsDO"]
 
 > إن لم يُضبط `ADS_STATS` ستعمل كل المسارات عدا العدّادات: `/ads/track` يرد
 > `accepted: 0` والتقارير تظهر أصفاراً. لا شيء ينهار، لكن لا تُحسب أرقام.
+> وإن لم يُضبط `ADS_CHAT`/`ADS_CHAT_INDEX` ترد مسارات المحادثة برسالة عربية
+> واضحة («ربط ADS_CHAT غير مهيأ») بدل أن تنهار، وبقية النظام يعمل كما هو.
 
 ### Cron Trigger
 
@@ -127,11 +162,13 @@ curl -s "$API/movies" | head -c 80                          # القديم ما 
 ## ٥) اختبار محلي قبل النشر
 
 ```bash
-./test/run.sh /path/to/cigram-admin-worker-v2.js
+./test/run.sh /path/to/cigram-admin-worker-v2.js        # كل المراحل
+./test/run.sh /path/to/cigram-admin-worker-v2.js a      # مرحلة واحدة
 ```
 
-يدمج الوحدة مع نسختك الحقيقية ويشغّل ١٠٢ فحصاً على Node (R2 و Durable Object
-محاكيان في الذاكرة). لا يلمس Cloudflare ولا الحاوية.
+يدمج الوحدات مع نسختك الحقيقية ويشغّل ٢١٥ فحصاً على Node (R2 والـ Durable
+Objects محاكاة في الذاكرة، والتشفير والتوقيع حقيقيان). لا يلمس Cloudflare ولا
+الحاوية.
 
 ---
 
@@ -143,7 +180,8 @@ curl -s "$API/movies" | head -c 80                          # القديم ما 
 | `ads/advertisers.json` | ملفات الشركات | أول معلن |
 | `ads/campaigns.json` | الحملات والمواد الإعلانية | أول حملة |
 | `ads/consents.json` | من وافق على أي نسخة سياسة ومتى | أول موافقة |
-| `ads/creatives/*` | الصور والفيديو المرفوعة | أول رفع |
+| `ads/creatives/*` | الصور والفيديو المرفوعة للحملات | أول رفع |
+| `ads/chat/media/*` | وسائط المحادثات — **مشفّرة**، ولا رابط عام لها | أول إرسال وسائط |
 
 لا شيء من هذه الملفات يُقرأ أو يُكتب من مسار قائم، وغيابها لا يكسر أي شيء:
 كل قارئ يسقط على القيم الافتراضية.
@@ -178,3 +216,44 @@ curl -s "$API/movies" | head -c 80                          # القديم ما 
 | `GET /admin/ads/campaigns` · `campaign/save` · `approve` · `reject` · `status` · `extend` · `payment` · `delete` | الحملات |
 | `POST /admin/ads/creative/upload` | رفع المواد (فحص MIME بالبايتات) |
 | `GET /admin/ads/report[?campaign=]` | تقرير حملة أو نظرة عامة |
+
+
+---
+
+## ٨) مسارات المرحلة (ج) — المحادثة والوسائط
+
+### المعلن المسجّل (Bearer = رمز المستخدم)
+| المسار | الوظيفة |
+|---|---|
+| `GET /ads/chat/history?since=&before=&limit=` | الرسائل، بصفحات للأقدم |
+| `GET /ads/chat/poll?since=` | انتظار حتى ٢٥ ثانية لرسالة جديدة |
+| `GET /ads/chat/ws?token=` | WebSocket لحظي |
+| `GET /ads/chat/state` | الحالة والحضور ومؤشر الكتابة |
+| `POST /ads/chat/send` | نص / صورة / فيديو / صوت / ملف / طلب إعلان |
+| `POST /ads/chat/read` · `typing` · `heartbeat` · `delete` | إيصال القراءة، الكتابة، النبض، حذف للنفس |
+| `POST /ads/chat/quote-respond` | قبول / تفاوض / رفض عرض سعر |
+| `POST /ads/chat/media/upload?kind=&name=` | رفع مباشر (صورة، صوت، ملف) |
+| `POST /ads/chat/media/mpu/create` · `part` · `complete` · `abort` | رفع متعدد الأجزاء للفيديو |
+| `GET /ads/chat/media?id=&exp=&sig=` | تنزيل موقّع (بلا تسجيل دخول: التوقيع هو الصلاحية) |
+
+### الأدمن (Bearer = `ADMIN_TOKEN`)
+| المسار | الوظيفة |
+|---|---|
+| `GET /admin/ads/chat/threads?filter=&q=&archived=1` | صندوق الوارد: `unread` · `new` · `important` · `awaiting_payment` · `blocked` |
+| `GET /admin/ads/chat/history?user=` · `poll` · `state` · `GET .../ws?user=` | نفس مزايا المستخدم |
+| `POST /admin/ads/chat/send` | الرد، و`internal: true` لملاحظة داخلية، و`kind: "quote"` لعرض سعر |
+| `POST /admin/ads/chat/flags` | حظر / أرشفة / وسوم / ملاحظة |
+| `POST /admin/ads/chat/export` | تصدير السجل نصاً (`internal: true` ليضمّ الملاحظات) |
+| `POST /admin/ads/chat/purge` | حذف المحادثة **ووسائطها من R2** |
+| `POST /admin/ads/chat/to-campaign` | تحويل بطاقة «طلب إعلان» إلى حملة بالحقول مملوءة |
+| `GET /admin/ads/security` | تقرير صريح بما هو مشفّر وما ليس كذلك |
+
+### ما يضمنه الاختبار في هذه المرحلة
+عزل المحادثات بين المعلنين · عدم وصول الملاحظات الداخلية للمعلن (لا في الرسائل
+ولا في بيانات المحادثة) · تشفير الرسائل والوسائط فعلياً في R2 (الاختبار يقرأ
+البايتات الخام ويتأكد أنها ليست الملف الأصلي) · رفض الروابط المعدّلة والمنتهية ·
+فحص MIME بالبايتات (ملف يبدأ بـ «GIF» وليس GIF حقيقياً مرفوض) · رفع الفيديو
+متعدد الأجزاء وفك تشفيره جزءاً بجزء · منع معلن من إرفاق ملف معلن آخر · منع
+المعلن من تلفيق عرض سعر · عدم الرد على عرض سعر مرتين · الحظر والأرشفة والتصدير ·
+الحذف الكامل مع الوسائط · طابور الإرسال (نفس `client_id` لا يُخزَّن مرتين) ·
+long-poll يُحرَّر فوراً عند وصول رسالة.
