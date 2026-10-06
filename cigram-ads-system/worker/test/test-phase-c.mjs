@@ -469,6 +469,25 @@ console.log("\n=== pagination ===");
   check("since= returns only what is newer", since.json.messages.length === 3, since.json.messages.length);
 }
 
+console.log("\n=== voice note waveform ===");
+{
+  const bytes = new Uint8Array(4096);
+  bytes.set([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x4d, 0x34, 0x41, 0x20]); // ftyp M4A
+  const up = await call("POST", "/ads/chat/media/upload?kind=audio&name=voice.m4a", { user: "token-beta", raw: bytes });
+  check("a voice note uploads as audio/mp4", up.status === 200 && up.json.data.mime === "audio/mp4", up.json);
+  const wave = "0a9zk3m";
+  const sent = await call("POST", "/ads/chat/send", { user: "token-beta", body: { kind: "audio", media_id: up.json.data.media_id, duration_ms: 4200, wave } });
+  check("the waveform is stored with the message", sent.json.message.wave === wave, sent.json.message);
+  check("the duration survives", sent.json.message.media.duration_ms === 4200, sent.json.message.media);
+  const back = await call("GET", "/ads/chat/history?limit=5", { user: "token-beta" });
+  const row = back.json.messages.find((m) => m.kind === "audio");
+  check("the waveform comes back on a later read", row && row.wave === wave, row && row.wave);
+  const dirty = await call("POST", "/ads/chat/send", { user: "token-beta", body: { kind: "audio", media_id: up.json.data.media_id, wave: "AB<>!! 0z" } });
+  check("a waveform is sanitised to base-36 digits", /^[0-9a-z]*$/.test(dirty.json.message.wave), dirty.json.message.wave);
+  const notAudio = await call("POST", "/ads/chat/send", { user: "token-beta", body: { kind: "text", text: "hi", wave } });
+  check("a text message never carries a waveform", notAudio.json.message.wave === "", notAudio.json.message.wave);
+}
+
 console.log("\n----------------------------------------");
 console.log(`  ${pass} passed, ${fail} failed`);
 console.log("----------------------------------------\n");

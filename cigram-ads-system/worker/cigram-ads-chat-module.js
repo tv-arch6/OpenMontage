@@ -333,6 +333,9 @@ async function adsChatBuildMessage(env, from, input, mediaRecord) {
     media: mediaRecord || null,
     order: null,
     quote: null,
+    // The packed waveform of a voice note (one base-36 digit per sample). Stored
+    // with the message so the bars survive a reinstall; it is not audio content.
+    wave: kind === "audio" ? adsText(input.wave, 1400).replace(/[^0-9a-z]/g, "") : "",
     deleted_for: [],
   };
 
@@ -363,6 +366,7 @@ async function adsChatPublicMessage(env, record, viewer) {
     text: await adsOpen(env, record.text),
     delivered_at: record.delivered_at || 0,
     read_at: viewer === "admin" ? record.read_by_user_at || 0 : record.read_by_admin_at || 0,
+    wave: record.wave || "",
   };
 
   if (record.order) {

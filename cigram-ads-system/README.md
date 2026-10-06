@@ -82,7 +82,7 @@
 |---|---|---|
 | أ | الباك إند الأساسي: إعدادات، معلنون، حملات، `/ads`، تتبع، تقارير | ✅ منفّذ ومُختبَر (١٠٢ فحصاً) |
 | ب | قسم الحساب + صفحة «أعلن هنا» كاملة | ✅ منفّذ، مفحوص بـ javac على Android 34 |
-| ج | المحادثة والحضور والوسائط (مستخدم + أدمن) | ⏳ |
+| ج | المحادثة والحضور والوسائط | ✅ الباك إند وتطبيق المستخدم؛ شاشات الأدمن في المرحلة (د) |
 | د | لوحة الأدمن للحملات والتقارير | ⏳ |
 | هـ | عرض الإعلانات `AdSlotView` | ⏳ |
 | و | الأمان والتشفير والتنظيف | ⏳ |
@@ -123,6 +123,25 @@
 
 خطوات التركيب في `user-app/INSTALL.md`.
 
+### المرحلة (ج) — منفّذة (الباك إند + تطبيق المستخدم)
+
+| الملف | جديد/معدّل | الوصف |
+|---|---|---|
+| `worker/cigram-ads-chat-module.js` | جديد | المحادثة والحضور والوسائط + `AdsChatDO` و`AdsChatIndexDO` |
+| `worker/apply-ads-patch.py` | **معدّل** | يدمج أي عدد من وحدات الإعلانات ويربط جداول مساراتها |
+| `user-app/java/…/CigramWs.java` | جديد | عميل WebSocket (RFC 6455) بلا مكتبات |
+| `user-app/java/…/CigramAdsChat.java` | جديد | النقل والترتيب وطابور الإرسال دون اتصال |
+| `user-app/java/…/CigramAdsChatAdapter.java` | جديد | قائمة الرسائل بكل أنواعها |
+| `user-app/java/…/CigramAdsChatActivity.java` | جديد | شاشة المحادثة والأذونات والمسجّل |
+| `user-app/java/…/CigramAdsMedia.java` | جديد | الضغط والرفع والتنزيل وكاش الصور |
+| `user-app/java/…/CigramAdsVoice.java` | جديد | التسجيل والتشغيل والموجة |
+| `user-app/java/…/CigramAdsDocViewer.java` | جديد | عارض PDF داخلي (`PdfRenderer`) |
+| `user-app/java/…/CigramMyAdsActivity.java` | جديد | «إعلاناتي» مع رسم يومي |
+| `user-app/test/*` | جديد | ١٣ فحصاً لعميل WebSocket مقابل خادم حقيقي |
+| `app_components.txt` (Manifest) | **معدّل: إضافة** | شاشتان جديدتان |
+
+إذن `CAMERA` **اختياري** (زر التصوير داخل المحادثة فقط). بقية الأذونات موجودة.
+
 ---
 
 ## الاختبار
@@ -131,8 +150,11 @@
 # الباك إند
 cd worker && ./test/run.sh /path/to/cigram-admin-worker-v2.js
 
-# كود الأندرويد (فحص أنواع، لا تجميع APK)
+# كود الأندرويد (فحص أنواع على مسار Android 34 حقيقي، لا تجميع APK)
 ./tools/javac-check.sh user
+
+# عميل WebSocket مقابل خادم RFC 6455 حقيقي
+./user-app/test/run-ws-test.sh
 ```
 
 يدمج الوحدة مع نسختك الحقيقية ويشغّلها على Node مع محاكاة R2 و Durable Object.

@@ -45,7 +45,12 @@ if [ -d "$here/stubs/$pkg" ]; then
   done
 fi
 
+log="$work/javac.log"
+set +e
 javac -nowarn -proc:none -Xlint:none -cp "$jar" -d "$work/out" \
-  $(find "$work/src" -name '*.java') 2>&1 | grep -v '^Note:' || true
-[ -n "$(find "$work/out" -name '*.class' -print -quit)" ] || { echo "JAVAC FAILED"; exit 1; }
+  $(find "$work/src" -name '*.java') >"$log" 2>&1
+status=$?
+set -e
+grep -v '^Note:' "$log" || true
+if [ "$status" -ne 0 ]; then echo "JAVAC FAILED (exit $status)"; exit 1; fi
 echo "JAVAC OK  ($(find "$work/out" -name '*.class' | wc -l) classes, target=android-34)"
