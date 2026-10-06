@@ -82,8 +82,8 @@
 |---|---|---|
 | أ | الباك إند الأساسي: إعدادات، معلنون، حملات، `/ads`، تتبع، تقارير | ✅ منفّذ ومُختبَر (١٠٢ فحصاً) |
 | ب | قسم الحساب + صفحة «أعلن هنا» كاملة | ✅ منفّذ، مفحوص بـ javac على Android 34 |
-| ج | المحادثة والحضور والوسائط | ✅ الباك إند وتطبيق المستخدم؛ شاشات الأدمن في المرحلة (د) |
-| د | لوحة الأدمن للحملات والتقارير | ⏳ |
+| ج | المحادثة والحضور والوسائط (مستخدم + أدمن) | ✅ منفّذ |
+| د | لوحة الأدمن للحملات والتقارير | ✅ منفّذ، مفحوص بـ javac على Android 34 |
 | هـ | عرض الإعلانات `AdSlotView` | ⏳ |
 | و | الأمان والتشفير والتنظيف | ⏳ |
 
@@ -142,6 +142,29 @@
 
 إذن `CAMERA` **اختياري** (زر التصوير داخل المحادثة فقط). بقية الأذونات موجودة.
 
+### المرحلتان (ج) و(د) — تطبيق الأدمن، منفّذتان
+
+| الملف | جديد/معدّل | الوصف |
+|---|---|---|
+| `admin-app/java/…/CgAdsApi.java` | جديد | كل المسارات فوق `CgHttp` القائم |
+| `admin-app/java/…/CgAdsUi.java` | جديد | Skeleton و Filters وبطاقات أرقام |
+| `admin-app/java/…/CgAdsPresence.java` · `CgAdsThread.java` | جديد | زر حالتي والتحول التلقائي لغير متصل |
+| `admin-app/java/…/CgWs.java` | جديد | نسخة عميل WebSocket بحزمة الأدمن |
+| `admin-app/java/…/CgAdsHubActivity.java` | جديد | مركز الإعلانات (البوابة الواحدة) |
+| `admin-app/java/…/CgAdsInboxActivity.java` | جديد | صندوق الوارد + البطاقة المثبتة |
+| `admin-app/java/…/CgAdsChatActivity.java` | جديد | المحادثة بردود جاهزة وملاحظات وعروض أسعار |
+| `admin-app/java/…/CgAdsCampaignsActivity.java` | جديد | قائمة الحملات والمراجعة السريعة |
+| `admin-app/java/…/CgAdsCampaignActivity.java` | جديد | الحملة الواحدة والمواد والدفع |
+| `admin-app/java/…/CgAdsSlotPreview.java` | جديد | معاينة مرسومة لشكل المساحة |
+| `admin-app/java/…/CgAdsAdvertisersActivity.java` | جديد | المعلنون |
+| `admin-app/java/…/CgAdsReportsActivity.java` | جديد | التقارير والرابط العام |
+| `admin-app/java/…/CgAdsSettingsActivity.java` | جديد | الأسعار والسياسات والتواصل |
+| `app_components.txt` (Manifest) | **معدّل: إضافة** | ٨ شاشات |
+| الشاشة الرئيسية للأدمن | **معدّل: سطر واحد** | `CgAdsHubActivity.entry(this)` |
+
+لا ملف Java قائم يتغيّر في تطبيق الأدمن، ولا مكتبة ولا إذن جديد.
+خطوات التركيب في `admin-app/INSTALL.md`.
+
 ---
 
 ## الاختبار
@@ -155,6 +178,9 @@ cd worker && ./test/run.sh /path/to/cigram-admin-worker-v2.js
 
 # عميل WebSocket مقابل خادم RFC 6455 حقيقي
 ./user-app/test/run-ws-test.sh
+
+# كود تطبيق الأدمن
+./tools/javac-check.sh admin
 ```
 
 يدمج الوحدة مع نسختك الحقيقية ويشغّلها على Node مع محاكاة R2 و Durable Object.
