@@ -302,6 +302,24 @@ function adsChatNormalizeOrder(raw) {
 }
 
 /**
+ * Message text, sanitised for storage.
+ *
+ * Unlike {@link adsText} this KEEPS `<` and `>`: a message is only ever rendered
+ * with TextView.setText / a JSON value, never as markup, and stripping them would
+ * mangle ordinary Arabic sentences like "السعر < 100". Control characters and
+ * bidi-override characters are still removed — the latter can visually reverse a
+ * line and make a quoted price read backwards.
+ */
+function adsMessageText(value, max) {
+  let text = cleanString(value);
+  // C0/C1 controls, plus the explicit bidi overrides (U+202A..U+202E, U+2066..U+2069)
+  text = text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g, "");
+  const limit = typeof max === "number" ? max : ADS_CHAT_MAX_TEXT;
+  if (text.length > limit) text = text.slice(0, limit);
+  return text;
+}
+
+/**
  * Builds the record that goes into Durable Object storage. Text is sealed, media
  * is referenced by id only, and the client's own `state`/`seq`/`at` are ignored.
  */
@@ -315,7 +333,7 @@ async function adsChatBuildMessage(env, from, input, mediaRecord) {
     throw adsFail("not_allowed", "نوع رسالة غير مسموح.", 403);
   }
 
-  const text = adsText(input.text || input.body, ADS_CHAT_MAX_TEXT);
+  const text = adsMessageText(input.text || input.body, ADS_CHAT_MAX_TEXT);
   if (kind === "text" && text.length === 0) {
     throw adsFail("empty_message", "لا يمكن إرسال رسالة فارغة.", 400);
   }
@@ -422,6 +440,24 @@ export class AdsChatDO {
     /** @type {Array<{resolve:Function,timer:any,viewer:string,since:number}>} */
     this.waiters = [];
     this.typing = { user: 0, admin: 0 };
+    /** Rolling send allowance for the advertiser (the admin is never limited). */
+    this.sendWindow = { minute: 0, used: 0 };
+    this.SEND_PER_MINUTE = 20;
+  }
+
+  /**
+   * Flood control for one conversation. In memory only: a Durable Object
+   * eviction resets the window, which at worst grants one extra burst, while the
+   * per-message storage write and the 4000-character cap bound the damage either
+   * way. The admin side is deliberately exempt.
+   */
+  allowSend() {
+    const minute = Math.floor(Date.now() / 60000);
+    if (this.sendWindow.minute !== minute) {
+      this.sendWindow = { minute, used: 0 };
+    }
+    this.sendWindow.used++;
+    return this.sendWindow.used <= this.SEND_PER_MINUTE;
   }
 
   // ---------------------------------------------------------------- plumbing
@@ -486,6 +522,7 @@ export class AdsChatDO {
         case "/quote-respond": return this.json(await this.respondToQuote(body));
         case "/flags": return this.json(await this.setFlags(body));
         case "/export": return this.json(await this.exportThread(body));
+        case "/trim": return this.json(await this.trim(body));
         case "/purge": return this.json(await this.purge());
         default: return this.json({ ok: false, error: "not_found" }, 404);
       }
@@ -505,6 +542,13 @@ export class AdsChatDO {
 
     if (from === "user" && meta.blocked) {
       throw adsFail("blocked", "لا يمكنك إرسال رسائل في هذه المحادثة.", 403);
+    }
+    if (from === "user" && !this.allowSend()) {
+      throw adsFail(
+        "too_fast",
+        "رسائل كثيرة في وقت قصير. انتظر قليلاً ثم أعد المحاولة.",
+        429
+      );
     }
 
     const record = body.message;
@@ -836,6 +880,46 @@ export class AdsChatDO {
     return { ok: true, transcript: lines.join("\n"), count: lines.length, meta: this.metaPublic(meta, "admin") };
   }
 
+  /**
+   * Deletes messages older than `days`, returning the media ids that went with
+   * them so R2 is cleaned in the same pass. A retention policy, not a purge: the
+   * thread, its flags and its newer messages stay.
+   */
+  async trim(body) {
+    const days = adsInt(body.days, 0, 1, 3650);
+    const cutoff = adsNow() - days * 86400000;
+    const meta = await this.meta();
+    const removedMedia = [];
+    let removed = 0;
+    const chunk = 200;
+    for (let start = 1; start <= meta.seq; start += chunk) {
+      const keys = [];
+      for (let s = start; s < start + chunk && s <= meta.seq; s++) keys.push(this.key(s));
+      const found = await this.state.storage.get(keys);
+      const doomed = [];
+      for (const key of keys) {
+        const record = found.get(key);
+        if (!record) continue;
+        if ((record.at || 0) >= cutoff) continue;
+        if (record.media) {
+          if (record.media.id) removedMedia.push(record.media.id);
+          if (record.media.thumb_id) removedMedia.push(record.media.thumb_id);
+        }
+        doomed.push(key);
+      }
+      if (doomed.length > 0) {
+        await this.state.storage.delete(doomed);
+        removed += doomed.length;
+      }
+    }
+    if (removedMedia.length > 0) {
+      const kept = adsArray(meta.media_ids).filter((id) => removedMedia.indexOf(id) < 0);
+      meta.media_ids = kept;
+      await this.putMeta(meta);
+    }
+    return { ok: true, removed, media_ids: removedMedia };
+  }
+
   /** Wipes the thread and hands back every media id so R2 can be cleaned too. */
   async purge() {
     const meta = await this.meta();
@@ -973,6 +1057,9 @@ export class AdsChatIndexDO {
       if (url.pathname === "/touch") return this.json(await this.touch(body));
       if (url.pathname === "/list") return this.json(await this.list(body));
       if (url.pathname === "/remove") return this.json(await this.remove(body));
+      if (url.pathname === "/media-pending") return this.json(await this.mediaPending(body));
+      if (url.pathname === "/media-attached") return this.json(await this.mediaAttached(body));
+      if (url.pathname === "/media-sweep") return this.json(await this.mediaSweep(body));
       return this.json({ ok: false, error: "not_found" }, 404);
     } catch (error) {
       return this.json({ ok: false, error: "internal_error", message: String(error && error.message) }, 500);
@@ -1038,6 +1125,45 @@ export class AdsChatIndexDO {
     if (!threadId) return { ok: false };
     await this.state.storage.delete("t:" + threadId);
     return { ok: true };
+  }
+
+  // ---------------------------------------------------------- orphan media
+  //
+  // An upload that is never attached to a message would otherwise sit in R2
+  // forever (the advertiser picked a photo and backed out, or the send failed).
+  // Every upload is recorded here and removed again when a message references
+  // it; the cron sweeps whatever is still unattached after a day.
+
+  async mediaPending(body) {
+    const id = cleanString(body.media_id);
+    if (!id) return { ok: false };
+    await this.state.storage.put("p:" + id, { id, at: adsNow() });
+    return { ok: true };
+  }
+
+  async mediaAttached(body) {
+    const ids = adsArray(body.media_ids).map((id) => cleanString(id)).filter(Boolean);
+    for (const id of ids) await this.state.storage.delete("p:" + id);
+    return { ok: true, cleared: ids.length };
+  }
+
+  async mediaSweep(body) {
+    // The cron passes a day; a smaller window is allowed so the behaviour is testable
+    // and so an operator can force an immediate sweep.
+    const olderThanMs = adsInt(body.older_than_ms, 86400000, 1000, 30 * 86400000);
+    const cutoff = adsNow() - olderThanMs;
+    const rows = await this.state.storage.list({ prefix: "p:", limit: 1000 });
+    const ids = [];
+    const keys = [];
+    for (const [key, value] of rows) {
+      if ((value && value.at) > cutoff) continue;
+      ids.push(value && value.id ? value.id : key.slice(2));
+      keys.push(key);
+    }
+    for (let i = 0; i < keys.length; i += 128) {
+      await this.state.storage.delete(keys.slice(i, i + 128));
+    }
+    return { ok: true, ids };
   }
 }
 
@@ -1339,6 +1465,91 @@ async function adsChatAdminToCampaign(request, env, url) {
   );
 }
 
+/** Admin retention: delete this conversation's messages older than N days. */
+async function adsChatAdminTrim(request, env, url) {
+  const body = await readRequestData(request);
+  const threadId = adsAdminThreadId(url, body);
+  const days = adsInt(body.days, 0, 1, 3650);
+  if (!days) throw adsFail("invalid", "حدّد عدد الأيام.", 400);
+  const result = adsChatEnsure(await adsChatJson(env, threadId, "/trim", { days }));
+  let removedMedia = 0;
+  for (const id of adsArray(result && result.media_ids)) {
+    try {
+      await env.MOVIES_BUCKET.delete(adsMediaKey(id));
+      removedMedia++;
+    } catch {
+      /* already gone */
+    }
+  }
+  await adsTouchIndex(env, threadId, {});
+  return okResponse(
+    { removed_messages: result ? result.removed : 0, removed_media: removedMedia },
+    "تم حذف الرسائل الأقدم من " + days + " يوماً."
+  );
+}
+
+/**
+ * Deletes everything this feature holds about the signed-in advertiser: their
+ * conversation, its media in R2, and their policy consent. Their campaigns and
+ * company file are NOT touched — those are a commercial record — and the reply
+ * says so, so the app can tell the truth in its confirmation.
+ */
+async function adsHandleForgetMe(request, env, url, user) {
+  const threadId = adsThreadIdForUser(user);
+  const purge = await adsChatJson(env, threadId, "/purge", {});
+  let removedMedia = 0;
+  for (const id of adsArray(purge && purge.media_ids)) {
+    try {
+      await env.MOVIES_BUCKET.delete(adsMediaKey(id));
+      removedMedia++;
+    } catch {
+      /* already gone */
+    }
+  }
+  await adsIndexJson(env, "/remove", { thread_id: threadId });
+
+  let consentRemoved = false;
+  try {
+    const doc = await adsReadConsents(env);
+    if (doc.items[user.id]) {
+      delete doc.items[user.id];
+      await writeJsonFile(env, ADS_CONSENTS_OBJECT, doc);
+      consentRemoved = true;
+    }
+  } catch {
+    /* a missing consents file is not a failure */
+  }
+
+  return json({
+    ok: true,
+    success: true,
+    data: {
+      conversation_deleted: true,
+      removed_messages: purge ? purge.removed || 0 : 0,
+      removed_media: removedMedia,
+      consent_deleted: consentRemoved,
+      campaigns_kept: true,
+      note: "حُذفت محادثتك ووسائطها وموافقتك على السياسات. "
+          + "حملاتك وملف شركتك سجل تجاري ولا يُحذف من هنا — راسل الإدارة لحذفه.",
+    },
+  });
+}
+
+/** Cron: delete uploads that were never attached to a message. */
+async function adsSweepOrphanMedia(env) {
+  const result = await adsIndexJson(env, "/media-sweep", { older_than_ms: 86400000 });
+  let removed = 0;
+  for (const id of adsArray(result && result.ids)) {
+    try {
+      await env.MOVIES_BUCKET.delete(adsMediaKey(id));
+      removed++;
+    } catch {
+      /* already gone */
+    }
+  }
+  return removed;
+}
+
 /** Best-effort push, reusing the update centre's relay if it is configured. */
 async function adsNotifyUser(env, threadId, kind) {
   const hook = cleanString(env.PUSH_WEBHOOK_URL);
@@ -1444,6 +1655,9 @@ async function adsMediaUpload(request, env, url, threadId) {
     },
   });
 
+  // Remembered as unattached; the cron deletes it if no message ever uses it.
+  await adsIndexJson(env, "/media-pending", { media_id: mediaId });
+
   return okResponse(
     {
       media_id: mediaId,
@@ -1533,6 +1747,8 @@ async function adsMediaMpuComplete(request, env, url, threadId) {
   meta.enc = key ? "1" : "0";
   meta.chunks = JSON.stringify(parts.map((p) => p.sealed));
   await adsRewriteMetadata(env, adsMediaKey(mediaId), meta);
+
+  await adsIndexJson(env, "/media-pending", { media_id: mediaId });
 
   return okResponse(
     { media_id: mediaId, url: await adsMediaUrl(env, mediaId), encrypted: Boolean(key) },
@@ -1689,6 +1905,11 @@ async function adsResolveMedia(env, threadId, body) {
     }
   }
 
+  // It is attached now, so it is no longer an orphan candidate.
+  await adsIndexJson(env, "/media-attached", {
+    media_ids: thumbId ? [mediaId, thumbId] : [mediaId],
+  });
+
   return {
     id: mediaId,
     mime: cleanString(meta.mime) || "application/octet-stream",
@@ -1742,6 +1963,8 @@ const ADS_CHAT_ROUTES = (() => {
     "POST /ads/chat/heartbeat": U(adsChatUserSimple("/heartbeat", "user")),
     "POST /ads/chat/delete": U(adsChatUserSimple("/delete", "user")),
     "POST /ads/chat/quote-respond": U(adsChatUserSimple("/quote-respond", "user")),
+    // "احذف بياناتي": the advertiser's own data, deleted by the advertiser
+    "POST /ads/forget-me": U(adsHandleForgetMe),
     "POST /ads/chat/media/upload": U(async (request, env, url, user) =>
       adsMediaUpload(request, env, url, adsThreadIdForUser(user))),
     "POST /ads/chat/media/mpu/create": U(async (request, env, url, user) =>
@@ -1773,6 +1996,7 @@ const ADS_CHAT_ROUTES = (() => {
     "POST /admin/ads/chat/flags": A(adsChatAdminSimple("/flags")),
     "POST /admin/ads/chat/export": A(adsChatAdminExport),
     "POST /admin/ads/chat/purge": A(adsChatAdminPurge),
+    "POST /admin/ads/chat/trim": A(adsChatAdminTrim),
     "POST /admin/ads/chat/to-campaign": A(adsChatAdminToCampaign),
     "POST /admin/ads/chat/media/upload": A(async (request, env, url) =>
       adsMediaUpload(request, env, url, adsAdminThreadId(url, null))),

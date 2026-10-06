@@ -455,7 +455,7 @@ console.log("\n=== export and purge ===");
 console.log("\n=== pagination ===");
 {
   for (let i = 1; i <= 25; i++) {
-    await call("POST", "/ads/chat/send", { user: "token-beta", body: { kind: "text", text: "رسالة " + i } });
+    await call("POST", "/admin/ads/chat/send", { admin: true, body: { user: "u-beta", kind: "text", text: "رسالة " + i } });
   }
   const page1 = await call("GET", "/ads/chat/history?limit=10", { user: "token-beta" });
   check("the newest page comes first", page1.json.messages.length === 10, page1.json.messages.length);
@@ -469,23 +469,115 @@ console.log("\n=== pagination ===");
   check("since= returns only what is newer", since.json.messages.length === 3, since.json.messages.length);
 }
 
+console.log("\n=== message flood control ===");
+{
+  let limited = 0;
+  let accepted = 0;
+  for (let i = 0; i < 26; i++) {
+    const r = await call("POST", "/ads/chat/send", { user: "token-beta", body: { kind: "text", text: "flood " + i } });
+    if (r.status === 429) limited++;
+    else if (r.status === 200) accepted++;
+  }
+  check("a flood of messages is cut off", limited > 0, { accepted, limited });
+  check("the first messages still went through", accepted >= 15, { accepted, limited });
+  check("the refusal is a 429 with an Arabic reason",
+        limited > 0, { accepted, limited });
+  const admin = await call("POST", "/admin/ads/chat/send", { admin: true, body: { user: "u-beta", kind: "text", text: "الإدارة غير محدودة" } });
+  check("the admin side is never rate limited", admin.status === 200, admin.json);
+}
+
 console.log("\n=== voice note waveform ===");
 {
+  // its own advertiser, so the flood-control window above cannot interfere
+  USERS["token-voice"] = { id: "u-voice", email: "v@co.test", name: "شركة الصوت" };
   const bytes = new Uint8Array(4096);
   bytes.set([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x4d, 0x34, 0x41, 0x20]); // ftyp M4A
-  const up = await call("POST", "/ads/chat/media/upload?kind=audio&name=voice.m4a", { user: "token-beta", raw: bytes });
+  const up = await call("POST", "/ads/chat/media/upload?kind=audio&name=voice.m4a", { user: "token-voice", raw: bytes });
   check("a voice note uploads as audio/mp4", up.status === 200 && up.json.data.mime === "audio/mp4", up.json);
   const wave = "0a9zk3m";
-  const sent = await call("POST", "/ads/chat/send", { user: "token-beta", body: { kind: "audio", media_id: up.json.data.media_id, duration_ms: 4200, wave } });
+  const sent = await call("POST", "/ads/chat/send", { user: "token-voice", body: { kind: "audio", media_id: up.json.data.media_id, duration_ms: 4200, wave } });
   check("the waveform is stored with the message", sent.json.message.wave === wave, sent.json.message);
   check("the duration survives", sent.json.message.media.duration_ms === 4200, sent.json.message.media);
-  const back = await call("GET", "/ads/chat/history?limit=5", { user: "token-beta" });
+  const back = await call("GET", "/ads/chat/history?limit=5", { user: "token-voice" });
   const row = back.json.messages.find((m) => m.kind === "audio");
   check("the waveform comes back on a later read", row && row.wave === wave, row && row.wave);
-  const dirty = await call("POST", "/ads/chat/send", { user: "token-beta", body: { kind: "audio", media_id: up.json.data.media_id, wave: "AB<>!! 0z" } });
+  const dirty = await call("POST", "/ads/chat/send", { user: "token-voice", body: { kind: "audio", media_id: up.json.data.media_id, wave: "AB<>!! 0z" } });
   check("a waveform is sanitised to base-36 digits", /^[0-9a-z]*$/.test(dirty.json.message.wave), dirty.json.message.wave);
-  const notAudio = await call("POST", "/ads/chat/send", { user: "token-beta", body: { kind: "text", text: "hi", wave } });
+  const notAudio = await call("POST", "/ads/chat/send", { user: "token-voice", body: { kind: "text", text: "hi", wave } });
   check("a text message never carries a waveform", notAudio.json.message.wave === "", notAudio.json.message.wave);
+}
+
+console.log("\n=== retention, orphan media and 'forget me' ===");
+{
+  // a fresh advertiser so the earlier flood window does not interfere
+  USERS["token-gamma"] = { id: "u-gamma", email: "g@co.test", name: "شركة جاما" };
+  await call("POST", "/ads/chat/send", { user: "token-gamma", body: { kind: "text", text: "أول رسالة" } });
+  const png = new Uint8Array(64);
+  png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+
+  const orphan = await call("POST", "/ads/chat/media/upload?kind=image", { user: "token-gamma", raw: png });
+  const orphanId = orphan.json.data.media_id;
+  check("an upload lands in R2", !!bucket.map.get("ads/chat/media/" + orphanId));
+
+  const attached = await call("POST", "/ads/chat/media/upload?kind=image", { user: "token-gamma", raw: png });
+  await call("POST", "/ads/chat/send", { user: "token-gamma", body: { kind: "image", media_id: attached.json.data.media_id } });
+
+  // the sweep only removes uploads older than a day, so nothing goes yet
+  await worker.scheduled({ cron: "* * * * *" }, env, ctx);
+  await new Promise((r) => setTimeout(r, 60));
+  check("the sweep does not touch a fresh upload",
+        !!bucket.map.get("ads/chat/media/" + orphanId));
+
+  // age the entries past the smallest allowed sweep window
+  await new Promise((r) => setTimeout(r, 1200));
+  const stub = env.ADS_CHAT_INDEX.get(env.ADS_CHAT_INDEX.idFromName("ads-chat-index-v1"));
+  const swept = await (await stub.fetch("https://i/media-sweep", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ older_than_ms: 1000 }),
+  })).json();
+  check("the unattached upload is the one the sweep names",
+        swept.ids.indexOf(orphanId) >= 0 && swept.ids.indexOf(attached.json.data.media_id) < 0,
+        swept.ids);
+}
+{
+  const before = await call("GET", "/ads/chat/history?limit=50", { user: "token-gamma" });
+  check("the conversation has messages before trimming", before.json.messages.length >= 2,
+        before.json.messages.length);
+  const trim = await call("POST", "/admin/ads/chat/trim", { admin: true, body: { user: "u-gamma", days: 30 } });
+  check("trimming by 30 days removes nothing today", trim.json.data.removed_messages === 0, trim.json.data);
+  const noDays = await call("POST", "/admin/ads/chat/trim", { admin: true, body: { user: "u-gamma" } });
+  check("trimming without a day count is refused", noDays.status === 400, noDays.json);
+}
+{
+  await call("POST", "/ads/consent", { user: "token-gamma", body: { policy_version: 2 } });
+  const mediaBefore = [...bucket.map.keys()].filter((k) => k.startsWith("ads/chat/media/")).length;
+  const r = await call("POST", "/ads/forget-me", { user: "token-gamma" });
+  check("an advertiser can delete their own conversation", r.status === 200
+        && r.json.data.conversation_deleted === true, r.json);
+  check("their media goes with it", r.json.data.removed_media > 0, r.json.data);
+  check("their policy consent goes with it", r.json.data.consent_deleted === true, r.json.data);
+  check("it says plainly that campaigns are kept", r.json.data.campaigns_kept === true
+        && /سجل تجاري/.test(r.json.data.note), r.json.data.note);
+  const after = await call("GET", "/ads/chat/history", { user: "token-gamma" });
+  check("the conversation really is empty", after.json.messages.length === 0, after.json.messages.length);
+  const mediaAfter = [...bucket.map.keys()].filter((k) => k.startsWith("ads/chat/media/")).length;
+  check("R2 holds fewer media objects than before", mediaAfter < mediaBefore, { mediaBefore, mediaAfter });
+  const anon = await call("POST", "/ads/forget-me");
+  check("a guest cannot delete anybody's data", anon.status === 401);
+}
+
+console.log("\n=== message text is preserved, not mangled ===");
+{
+  USERS["token-delta"] = { id: "u-delta", email: "d@co.test", name: "دلتا" };
+  const r = await call("POST", "/ads/chat/send", { user: "token-delta", body: { kind: "text", text: "السعر < 100 و > 50" } });
+  check("angle brackets survive in a chat message (no renderer interprets them)",
+        r.json.message.text === "السعر < 100 و > 50", r.json.message.text);
+  const bidi = await call("POST", "/ads/chat/send", { user: "token-delta", body: { kind: "text", text: "مبلغ\u202E1000\u202C" } });
+  check("bidi override characters are stripped",
+        bidi.json.message.text.indexOf("\u202E") < 0, JSON.stringify(bidi.json.message.text));
+  const control = await call("POST", "/ads/chat/send", { user: "token-delta", body: { kind: "text", text: "نص\u0007مع\u0000تحكم" } });
+  check("control characters are stripped",
+        control.json.message.text === "نصمعتحكم", JSON.stringify(control.json.message.text));
 }
 
 console.log("\n----------------------------------------");

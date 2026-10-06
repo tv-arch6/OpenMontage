@@ -1971,7 +1971,19 @@ async function adsCron(env) {
 
   if (changed) await adsWriteCampaigns(env, doc);
   if (expiring.length > 0) await adsNotifyExpiring(env, expiring);
-  return { changed, expiring: expiring.length };
+
+  // Once an hour, clear uploads that were never attached to a message. The chat
+  // module defines this; when only phase (أ) is deployed the call is skipped.
+  let sweptMedia = 0;
+  try {
+    if (new Date(now).getUTCMinutes() === 7 && typeof adsSweepOrphanMedia === "function") {
+      sweptMedia = await adsSweepOrphanMedia(env);
+    }
+  } catch {
+    /* the sweep is housekeeping: never fail the cron for it */
+  }
+
+  return { changed, expiring: expiring.length, swept_media: sweptMedia };
 }
 
 /** Reuses the update centre's push relay when it is configured; silent otherwise. */
