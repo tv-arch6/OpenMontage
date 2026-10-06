@@ -1302,9 +1302,13 @@ async function adsHandleTrack(request, env) {
   const events = adsArray(body.events)
     .slice(0, 50)
     .map((e) => {
-      const type = cleanString(e && e.type) === "click" ? "click" : "impression";
+      // Three kinds, and nothing else: an unknown type must not be silently
+      // counted as an impression (a viewer's "إبلاغ" used to inflate the count).
+      const raw = cleanString(e && e.type);
+      const type = raw === "click" || raw === "report" ? raw : "impression";
       return {
         type,
+        reason: raw === "report" ? adsText(e && e.reason, 120) : "",
         campaign_id: adsText(e && e.campaign_id, 80),
         creative_id: adsText(e && e.creative_id, 80),
         slot: ADS_SLOT_IDS.indexOf(cleanString(e && e.slot)) >= 0 ? cleanString(e.slot) : "",
@@ -1321,6 +1325,7 @@ async function adsHandleTrack(request, env) {
     ok: true,
     success: true,
     accepted: result && typeof result.accepted === "number" ? result.accepted : 0,
+    reports: result && typeof result.reports === "number" ? result.reports : 0,
     rejected: result && typeof result.rejected === "number" ? result.rejected : 0,
     // The client backs off for a minute when it sees this instead of retrying the batch.
     rate_limited: Boolean(result && result.rate_limited),
@@ -1337,9 +1342,11 @@ function adsReportShape(campaign, advertiser, stats, settings) {
   const days = adsArray(stats && stats.days);
   let impressions = 0;
   let clicks = 0;
+  let reports = 0;
   for (const d of days) {
     impressions += adsInt(d.impressions, 0, 0, 1e12);
     clicks += adsInt(d.clicks, 0, 0, 1e12);
+    reports += adsInt(d.reports, 0, 0, 1e12);
   }
   const slot = settings.slots.find((s) => s.id === campaign.slot);
   return {
@@ -1357,6 +1364,7 @@ function adsReportShape(campaign, advertiser, stats, settings) {
     totals: {
       impressions,
       clicks,
+      reports,
       ctr: impressions > 0 ? Math.round((clicks / impressions) * 10000) / 100 : 0,
     },
     days,
@@ -1905,6 +1913,8 @@ async function adsAdminReport(request, env, url) {
     const report = adsReportShape(campaign, advertiser, stats, settings);
     report.public_url = "/ads/report?token=" + campaign.report_token;
     report.report_token = campaign.report_token;
+    // Viewer complaints are for the admin only; the public report never shows them.
+    report.report_reasons = adsArray(stats && stats.report_reasons);
     return okResponse(report, "");
   }
   const overview = await adsStatsCall(env, "/overview", {});
@@ -2007,6 +2017,8 @@ export class AdsStatsDO {
     this.rate = new Map();
     this.DAY_IMPRESSION_CAP = 40;
     this.DAY_CLICK_CAP = 15;
+    /** One device reporting the same campaign twice a day adds nothing. */
+    this.DAY_REPORT_CAP = 2;
     this.RATE_LIMIT = 120; // events per device per minute
   }
 
@@ -2073,11 +2085,13 @@ export class AdsStatsDO {
 
     let accepted = 0;
     let rejected = 0;
+    let reports = 0;
     const campaignTouched = new Set();
 
     await this.state.blockConcurrencyWhile(async () => {
       for (const e of events) {
-        const type = e && e.type === "click" ? "click" : "impression";
+        const raw = e && e.type;
+        const type = raw === "click" || raw === "report" ? raw : "impression";
         const campaign = String((e && e.campaign_id) || "").slice(0, 80);
         if (!campaign) {
           rejected++;
@@ -2089,7 +2103,7 @@ export class AdsStatsDO {
         }
         const day = this.dayKey(Number(e && e.ts) || Date.now());
         const userKey = "u:" + device + ":" + campaign + ":" + day;
-        const user = (await this.state.storage.get(userKey)) || { i: 0, c: 0 };
+        const user = (await this.state.storage.get(userKey)) || { i: 0, c: 0, r: 0 };
         if (type === "impression" && user.i >= this.DAY_IMPRESSION_CAP) {
           rejected++;
           continue;
@@ -2098,15 +2112,29 @@ export class AdsStatsDO {
           rejected++;
           continue;
         }
+        if (type === "report" && (user.r || 0) >= this.DAY_REPORT_CAP) {
+          rejected++;
+          continue;
+        }
         if (type === "impression") user.i++;
-        else user.c++;
+        else if (type === "click") user.c++;
+        else user.r = (user.r || 0) + 1;
         await this.state.storage.put(userKey, user);
 
         const dayKey = "c:" + campaign + ":" + day;
-        const totals = (await this.state.storage.get(dayKey)) || { i: 0, c: 0 };
+        const totals = (await this.state.storage.get(dayKey)) || { i: 0, c: 0, r: 0 };
         if (type === "impression") totals.i++;
-        else totals.c++;
+        else if (type === "click") totals.c++;
+        else totals.r = (totals.r || 0) + 1;
         await this.state.storage.put(dayKey, totals);
+        if (type === "report") {
+          reports++;
+          // Keep only the newest reasons: enough to act on, not a log of everyone.
+          const reasonKey = "rr:" + campaign;
+          const stored = (await this.state.storage.get(reasonKey)) || [];
+          stored.push({ reason: String((e && e.reason) || "").slice(0, 120), at: Date.now() });
+          await this.state.storage.put(reasonKey, stored.slice(-50));
+        }
 
         campaignTouched.add(campaign);
         accepted++;
@@ -2126,7 +2154,7 @@ export class AdsStatsDO {
     });
 
     await this.scheduleCleanup();
-    return { ok: true, accepted, rejected };
+    return { ok: true, accepted, rejected, reports };
   }
 
   async scheduleCleanup() {
@@ -2173,10 +2201,12 @@ export class AdsStatsDO {
         day: key.slice(key.lastIndexOf(":") + 1),
         impressions: Number(value && value.i) || 0,
         clicks: Number(value && value.c) || 0,
+        reports: Number(value && value.r) || 0,
       });
     }
     days.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
-    return { ok: true, campaign_id: campaign, days };
+    const reasons = (await this.state.storage.get("rr:" + campaign)) || [];
+    return { ok: true, campaign_id: campaign, days, report_reasons: reasons.slice(-20) };
   }
 
   async overview() {
