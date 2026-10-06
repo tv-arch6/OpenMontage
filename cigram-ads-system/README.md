@@ -81,7 +81,7 @@
 | | المرحلة | الحالة |
 |---|---|---|
 | أ | الباك إند الأساسي: إعدادات، معلنون، حملات، `/ads`، تتبع، تقارير | ✅ منفّذ ومُختبَر (١٠٢ فحصاً) |
-| ب | قسم الحساب + صفحة «أعلن هنا» كاملة | ⏳ |
+| ب | قسم الحساب + صفحة «أعلن هنا» كاملة | ✅ منفّذ، مفحوص بـ javac على Android 34 |
 | ج | المحادثة والحضور والوسائط (مستخدم + أدمن) | ⏳ |
 | د | لوحة الأدمن للحملات والتقارير | ⏳ |
 | هـ | عرض الإعلانات `AdSlotView` | ⏳ |
@@ -104,12 +104,35 @@
 
 لا ملف قائم آخر يتغيّر في المرحلة (أ).
 
+### المرحلة (ب) — منفّذة
+
+| الملف | جديد/معدّل | الوصف |
+|---|---|---|
+| `user-app/java/com.Cigram.vid/CigramAdsApi.java` | جديد | كل شبكة الميزة: خيوط خلفية، كاش، أخطاء عربية |
+| `user-app/java/com.Cigram.vid/CigramAdsUi.java` | جديد | الكِت البصري: بطاقات، صفوف، أيقونات Canvas، Accordion، Skeleton |
+| `user-app/java/com.Cigram.vid/CigramAdsCalculator.java` | جديد | حاسبة التكلفة (كل سعر من `/ads/quote`) |
+| `user-app/java/com.Cigram.vid/CigramAdvertiseActivity.java` | جديد | صفحة «أعلن هنا» بأقسامها السبعة |
+| `user-app/java/com.Cigram.vid/CigramAdsEntry.java` | جديد | توحيد صفوف قسم الحساب + صف «أعلن هنا» |
+| `user-app/java/com.Cigram.vid/CigramAccountExtras.java` | **معدّل** | صار يبني صف التحديثات فقط ويسلّم التنسيق لـ `CigramAdsEntry` |
+| `app_components.txt` (Manifest) | **معدّل: إضافة** | تسجيل `CigramAdvertiseActivity` |
+| `tools/javac-check.sh` + `tools/stubs/` | جديد | فحص أنواع على مسار Android 34 حقيقي |
+
+لا تعديل على أي Layout، ولا موارد جديدة، ولا مكتبات جديدة، ولا أذونات جديدة.
+`CigramStage1InitProvider.java` و`CigramUI.java` و`CigramAdConfig.java`
+و`CigramAdManager.java` لم تُلمس.
+
+خطوات التركيب في `user-app/INSTALL.md`.
+
 ---
 
 ## الاختبار
 
 ```bash
+# الباك إند
 cd worker && ./test/run.sh /path/to/cigram-admin-worker-v2.js
+
+# كود الأندرويد (فحص أنواع، لا تجميع APK)
+./tools/javac-check.sh user
 ```
 
 يدمج الوحدة مع نسختك الحقيقية ويشغّلها على Node مع محاكاة R2 و Durable Object.
