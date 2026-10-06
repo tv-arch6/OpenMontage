@@ -177,6 +177,26 @@ public class CigramMyAdsActivity extends Activity implements CigramAdsApi.Alive 
             if (campaign == null) continue;
             content.addView(campaignCard(campaign), CigramAdsUi.lp(this, -1, -2, 0, 12, 0, 0));
         }
+
+        content.addView(privacyCard(), CigramAdsUi.lp(this, -1, -2, 0, 20, 0, 0));
+    }
+
+    /**
+     * The advertiser's own data controls. It lives here, where an advertiser
+     * actually is, rather than in the account list where it would be noise for
+     * the viewers who never advertise.
+     */
+    private View privacyCard() {
+        LinearLayout card = CigramAdsUi.card(this);
+        card.addView(CigramAdsUi.text(this, "بياناتك", 14.5f, CigramAdsUi.TEXT, true),
+                new LinearLayout.LayoutParams(-1, -2));
+        card.addView(CigramAdsUi.muted(this,
+                        "محادثتك ووسائطها مخزّنة مشفّرة، ولا تُشارك مع أي طرف. "
+                                + "بيانات مستخدمي التطبيق لا تُشارك معك ولا مع أي معلن."),
+                CigramAdsUi.lp(this, -1, -2, 0, 6, 0, 10));
+        View row = CigramAdsPrivacy.row(this);
+        if (row != null) card.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        return card;
     }
 
     private View summaryCard(int count, long impressions, long clicks) {

@@ -38,6 +38,19 @@ Sketchware ← المشروع ← **Java Manager** (أو «ملفات Java» ح�
 | `CigramAdSlots.java` | **جديد** — الجلب والكاش والوقت والحدود والعدّ |
 | `CigramAdSlotView.java` | **جديد** — المكوّن الواحد بكل أشكال المساحات |
 
+### المرحلة (و) — الخصوصية
+
+| الملف | الإجراء |
+|---|---|
+| `CigramAdsPrivacy.java` | **جديد** — «حذف بيانات الإعلانات» + تنظيف الجهاز |
+
+يظهر الزر تلقائياً في أسفل شاشة «إعلاناتي» (حيث المعلن فعلاً، لا في قائمة
+الحساب حيث سيكون ضجيجاً لمن لا يُعلن). ويُستدعى عند حذف الحساب:
+
+```java
+CigramAdsPrivacy.wipeLocal(context);   // بلا شبكة، آمن دائماً
+```
+
 > `CigramAccountExtras.java` هو الملف الوحيد المستبدَل. نقطة الدخول
 > `CigramAccountExtras.arrange(activity)` لم تتغيّر، فكل مَن يستدعيها
 > (`CigramStage1InitProvider.renderStage3Account`) يعمل كما هو بلا أي تعديل.
